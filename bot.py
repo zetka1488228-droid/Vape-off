@@ -3,13 +3,17 @@ import logging
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
-    ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler
+    ApplicationBuilder, 
+    ContextTypes, 
+    CommandHandler, 
+    MessageHandler, 
+    filters, 
+    ConversationHandler,
+    CallbackQueryHandler
 )
 
-# Настройка логов
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# Получаем переменные из Railway
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -17,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 MINI_APP_URL = "https://vapeoffj.netlify.app"
 ADMIN_IDS = [8678582128, 8918951833]
 
-# Состояния для диалога добавления товара
+# Состояния диалога
 PHOTO, TITLE, PRICE, CATEGORY, FLAVORS = range(5)
 
 def main_keyboard():
@@ -53,21 +57,16 @@ async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PHOTO
 
 async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Защита от того, что пользователь отправил не фото
     if not update.message.photo:
         await update.message.reply_text("❌ Пожалуйста, отправьте именно картинку (фото).")
         return PHOTO
 
     try:
-        # Скачиваем фото из Telegram
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         file_name = f"product_{update.message.message_id}.jpg"
         
-        # Загружаем в Supabase Storage
         url = f"{SUPABASE_URL}/storage/v1/object/products/{file_name}"
-        
-        # ВАЖНО: Для новых ключей sb_publishable нужен заголовок apikey
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -76,18 +75,16 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         response = requests.post(url, headers=headers, data=photo_bytes)
         
-        # Если статус 200 или 201 (создано), значит всё ок
         if response.status_code in [200, 201]:
             public_url = f"{SUPABASE_URL}/storage/v1/object/public/products/{file_name}"
             context.user_data['image_url'] = public_url
             await update.message.reply_text("✅ Фото загружено!\nТеперь введите НАЗВАНИЕ товара.")
             return TITLE
         else:
-            error_msg = response.json().get('message', response.text)
-            await update.message.reply_text(f"❌ Ошибка загрузки фото: {error_msg}")
+            await update.message.reply_text(f"❌ Ошибка загрузки фото: {response.text}")
             return PHOTO
     except Exception as e:
-        await update.message.reply_text(f"❌ Системная ошибка при загрузке: {str(e)}")
+        await update.message.reply_text(f"❌ Системная ошибка: {str(e)}")
         return PHOTO
 
 async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,12 +98,12 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите КАТЕГОРИЮ (Жидкости, Испарители, Расходники).")
         return CATEGORY
     except ValueError:
-        await update.message.reply_text("❌ Пожалуйста, введите цену цифрой (без букв и символов).")
+        await update.message.reply_text("❌ Пожалуйста, введите цену цифрой (без букв).")
         return PRICE
 
 async def get_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['category'] = update.message.text
-    await update.message.reply_text("Введите ВКУСЫ через запятую (например: Клубника, Банан). Если вкусов нет — напишите 'нет'.")
+    await update.message.reply_text("Введите ВКУСЫ через запятую. Если вкусов нет — напишите 'нет'.")
     return FLAVORS
 
 async def get_flavors(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,7 +119,6 @@ async def get_flavors(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "flavors": flavors_text
     }
     
-    # Сохраняем данные в таблицу products
     url = f"{SUPABASE_URL}/rest/v1/products"
     headers = {
         "apikey": SUPABASE_KEY,
@@ -133,19 +129,17 @@ async def get_flavors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         response = requests.post(url, headers=headers, json=data)
-        
         if response.status_code in [200, 201]:
             await update.message.reply_text("✅ Товар успешно добавлен в каталог!", reply_markup=main_keyboard())
         else:
-            error_msg = response.text
-            await update.message.reply_text(f"❌ Ошибка базы данных: {error_msg}")
+            await update.message.reply_text(f"❌ Ошибка базы данных: {response.text}")
     except Exception as e:
         await update.message.reply_text(f"❌ Системная ошибка: {str(e)}")
         
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Добавление товара отменено.", reply_markup=main_keyboard())
+    await update.message.reply_text("Отменено.", reply_markup=main_keyboard())
     return ConversationHandler.END
 
 def main():
@@ -156,11 +150,10 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Обработчик шагов добавления товара
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_product_start, pattern="^add_product$")],
         states={
-            PHOTO: [MessageHandler(filters.PHOTO | filters.TEXT, get_photo)], # Ловим и фото, и текст (чтобы выдать ошибку)
+            PHOTO: [MessageHandler(filters.PHOTO | filters.TEXT, get_photo)],
             TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
             CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_category)],
