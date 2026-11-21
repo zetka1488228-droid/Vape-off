@@ -1,73 +1,141 @@
-import os
+ import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    filters,
+    ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler
 )
 
-# Логирование
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# Токен берется из переменных окружения Railway
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MINI_APP_URL = "https://vapeoffj.netlify.app"
+ADMIN_IDS = [8678582128, 8918951833]
 
-# Тексты
-WELCOME_TEXT = (
-    "🔥 <b>Добро пожаловать в Vape off!</b> 🔥\n\n"
-    "Здесь ты найдешь все для вкусного пара:\n"
-    "💨 Одноразки\n"
-    "💧 Жижи\n"
-    "⚙️ Расходники\n"
-    "🎁 И многое другое — большой выбор!\n\n"
-    "Весь каталог и оформление заказа находятся в нашем приложении.\n"
-    "По любым вопросам пиши: @IkrovnI"
-)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Клавиатура (только кнопка связи, без Mini App)
+PHOTO, TITLE, PRICE, CATEGORY, FLAVORS = range(5)
+
 def main_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("💬 Написать менеджеру", url="https://t.me/IkrovnI")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Открыть каталог", web_app=WebAppInfo(url=MINI_APP_URL))],
+        [InlineKeyboardButton("💬 Написать менеджеру", url="https://t.me/v4peoff")],
+        [InlineKeyboardButton("📢 Наш канал", url="https://t.me/v4peofff")]
+    ])
 
-# Обработчик команды /start
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить товар", callback_data="add_product")]
+    ])
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        WELCOME_TEXT,
-        parse_mode="HTML",
-        reply_markup=main_keyboard(),
-    )
+    text = "🔥 <b>Добро пожаловать в Vape off!</b> 🔥\n\nЖми кнопку, чтобы открыть каталог!"
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=main_keyboard())
 
-# Автоответ на любые другие сообщения
 async def auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Спасибо за сообщение! Я передал его менеджеру @IkrovnI.\n"
-        "Он ответит тебе в ближайшее время.",
-        reply_markup=main_keyboard(),
-    )
+    await update.message.reply_text("👋 Менеджер скоро ответит. А пока посмотри каталог!", reply_markup=main_keyboard())
 
-# Запуск
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас нет доступа к админ-панели.")
+        return
+    await update.message.reply_text("🛠 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_keyboard())
+
+async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("📸 Отправьте фото товара (как картинку, не файлом).")
+    return PHOTO
+
+async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo_file = await update.message.photo[-1].get_file()
+    photo_bytes = await photo_file.download_as_bytearray()
+    file_name = f"product_{update.message.message_id}.jpg"
+    
+    url = f"{SUPABASE_URL}/storage/v1/object/products/{file_name}"
+    headers = {"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "image/jpeg"}
+    response = requests.post(url, headers=headers, data=photo_bytes)
+    
+    if response.status_code == 200:
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/products/{file_name}"
+        context.user_data['image_url'] = public_url
+        await update.message.reply_text("✅ Фото загружено!\nТеперь введите НАЗВАНИЕ товара.")
+        return TITLE
+    else:
+        await update.message.reply_text(f"❌ Ошибка загрузки фото. Попробуйте еще раз. ({response.text})")
+        return PHOTO
+
+async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['title'] = update.message.text
+    await update.message.reply_text("Введите ЦЕНУ товара (только цифру).")
+    return PRICE
+
+async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        context.user_data['price'] = int(update.message.text)
+        await update.message.reply_text("Введите КАТЕГОРИЮ (Жидкости, Испарители, Расходники).")
+        return CATEGORY
+    except ValueError:
+        await update.message.reply_text("❌ Введите цену цифрой.")
+        return PRICE
+
+async def get_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['category'] = update.message.text
+    await update.message.reply_text("Введите ВКУСЫ через запятую. Если вкусов нет — напишите 'нет'.")
+    return FLAVORS
+
+async def get_flavors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    flavors_text = update.message.text
+    if flavors_text.lower() == 'нет':
+        flavors_text = ""
+        
+    data = {
+        "title": context.user_data['title'],
+        "price": context.user_data['price'],
+        "category": context.user_data['category'],
+        "image_url": context.user_data['image_url'],
+        "flavors": flavors_text
+    }
+    
+    url = f"{SUPABASE_URL}/rest/v1/products"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    
+    response = requests.post(url, headers=headers, json=data)
+    
+    if response.status_code == 201:
+        await update.message.reply_text("✅ Товар добавлен в каталог!", reply_markup=main_keyboard())
+    else:
+        await update.message.reply_text(f"❌ Ошибка базы данных: {response.text}")
+        
+    return ConversationHandler.END
+
 def main():
-    if not TOKEN:
-        raise ValueError("Не задан TELEGRAM_BOT_TOKEN!")
-
-    # drop_pending_updates=True очищает старые зависшие запросы (решает конфликты)
     app = ApplicationBuilder().token(TOKEN).build()
 
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_product_start, pattern="^add_product$")],
+        states={
+            PHOTO: [MessageHandler(filters.PHOTO, get_photo)],
+            TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
+            PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
+            CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_category)],
+            FLAVORS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_flavors)],
+        },
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+    )
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(conv_handler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply))
 
-    logger.info("Бот Vape off запущен!")
-    
-    # Запускаем без очистки, чтобы избежать проблем
     app.run_polling()
 
 if __name__ == "__main__":
